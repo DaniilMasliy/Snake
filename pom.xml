@@ -16,10 +16,26 @@
     </properties>
 
     <build>
-        <!-- Source files live in src/ (flat, no sub-packages) -->
+        <!-- Legacy source files live in src/; new com.snake.core classes in src/main/java/ -->
         <sourceDirectory>src</sourceDirectory>
 
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.4.0</version>
+                <executions>
+                    <execution>
+                        <phase>generate-sources</phase>
+                        <goals><goal>add-source</goal></goals>
+                        <configuration>
+                            <sources>
+                                <source>src/main/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
