@@ -1,497 +1,505 @@
-# Snake Game — Modernization Architecture
+# Snake Game — Modernization Architecture (v2)
 
 ## Summary
 
-This document defines the full modernization plan for the Snake game. The project is a small (~340 lines) Java/Swing implementation with no build tool, no tests, no CI, several bugs, and a minimal UI. The goal is a polished, maintainable game that feels intentional in 2026 — not just fixed up, but something a developer would be proud to show.
+The project is a small Java/Swing Snake game (~340 lines, 7 classes, default package). **The goal is to make it look and feel like a real 2026 game.** Visual enhancement is the primary objective; backend improvements are targeted at the bugs that actively break the game and the minimal structure needed to support good rendering.
 
-**Most important first step: GitHub Actions CI.** The Maven build (PR#1) is the prerequisite; CI is the first item that must follow, because every other modernization PR needs an automated pass/fail signal to be safely reviewable by the pipeline.
+**Current progress:**
+- Maven build is in place (`pom.xml`, Java 11, `src/` source root). `mvn package` produces `target/SnakeGame.jar`.
+- Docker fix PR is open (not yet merged).
+- Source code is entirely unchanged from the original. All original bugs are present.
+- No CI, no tests, no FlatLaf, no game-over screen, no menu, no score display.
+
+**What still needs to happen — in priority order:**
+1. CI gate (required before anything else merges)
+2. Visual: theme, custom rendering, styled cells, menu, HUD, game-over, pause
+3. Backend: replace `Thread.sleep` game loop, fix the game-over hang, add tests
 
 ---
 
 ## Current-state assessment
 
-### Architecture
+### Code structure
 
-The project has six classes, all in the default package, all in `src/`:
-
-| Class | Role |
-|---|---|
-| `Main` | Entry point; creates the window |
-| `Window` | `JFrame` subclass; owns the grid, starts the game thread |
-| `ThreadsController extends Thread` | Game loop, snake movement, collision, food — everything |
-| `DataOfSquare` | Holds a `SquarePanel` and maps int color codes to `Color` objects |
-| `SquarePanel extends JPanel` | Single colored cell |
-| `KeyboardListener extends KeyAdapter` | Reads arrow keys, writes to a static field |
-| `Tuple` | x/y pair with two unused fields (`xf`, `yf`) |
-
-All game state, rendering, and the game loop are collapsed into `ThreadsController`. There is no separation between logic and presentation.
-
-### Code quality
-
-- **`ThreadsController.directionSnake` is `static`** (`ThreadsController.java:10`). Any class can write to it; it makes unit testing impossible and concurrent instances share state.
-- **Magic numbers everywhere.** Direction codes (0–4), color codes (0–2), and grid size (20) appear as bare integers throughout. No constants, no enums.
-- **Unused dead code.** `Tuple.xf` and `Tuple.yf` (`Tuple.java:4–5`) are declared and never read.
-- **Non-Java naming.** Fields `C`, `Squares`; methods `ChangeData`, `ChangeColor`, `lightMeUp` — mix of Pascal case and arbitrary casing violates Java conventions throughout.
-- **No package structure.** All classes are in the default package; IDEs and tools handle this poorly.
+| Class | Role | Problem |
+|---|---|---|
+| `Main` | Entry point, creates `Window` | None |
+| `Window extends JFrame` | Builds 20×20 `JPanel` grid, starts game thread | Global static `Grid` shared mutable state |
+| `ThreadsController extends Thread` | Game loop, movement, collision, food | Does everything; thread-safety violations; hangs on game over |
+| `DataOfSquare` | Maps int color codes to cell panel | Rendering tightly coupled to game state |
+| `SquarePanel extends JPanel` | One colored cell | 400 separate panels where one canvas would do |
+| `KeyboardListener extends KeyAdapter` | Key to static int | Writes to a `static` field |
+| `Tuple` | (x, y) pair | Has two unused fields `xf`, `yf`; no Java naming conventions |
 
 ### Bugs
 
-| Bug | Location | Impact |
-|---|---|---|
-| `stopTheGame()` loops forever | `ThreadsController.java:73–77` | Game over hangs the game thread; the only recovery is to kill and reopen the process |
-| Food spawn hardcodes 19 instead of grid constant | `ThreadsController.java:88–89` | If grid size ever changes, food can spawn off-grid |
-| `getValAleaNotInSnake()` resets loop index to 0 on conflict | `ThreadsController.java:95` | Retry loop is O(n²) and biased; can theoretically loop forever on a near-full board |
-| `repaint()` called from game thread | `DataOfSquare.java:21` → `SquarePanel.java:14` | Swing UI must be updated on the Event Dispatch Thread; this is a threading violation that causes intermittent rendering glitches |
-| Docker compose references wrong jar name | `docker-compose.yml:7` | `Snakegame.jar` (lowercase g) vs actual `SnakeGame.jar`; Docker setup is broken |
+| ID | Description | Location | Impact |
+|---|---|---|---|
+| BUG-1 | `stopTheGame()` loops forever on collision | `ThreadsController.java:73–77` | Game hangs; only recovery is killing the process |
+| BUG-2 | `repaint()` called from game thread, not EDT | `DataOfSquare.java:21` | Swing threading violation; intermittent rendering glitches |
+| BUG-3 | Food spawn hardcodes `19` instead of grid constant | `ThreadsController.java:88–89` | Off-by-one if grid size ever changes |
+| BUG-4 | Food collision check swaps x and y axes | `ThreadsController.java:62` | Works by coincidence on a 20×20 symmetric grid; fragile |
+| BUG-5 | Docker compose references `Snakegame.jar` (lowercase g) | `docker-compose.yml:7` | Docker launch fails on Linux |
+| BUG-6 | `SnakeGame.jar` committed to repo | repo root | Binary can drift silently from source |
 
-### Build and tooling
+### What is missing
 
-- No build tool. Compilation requires manual `javac`. No repeatable build.
-- Prebuilt `SnakeGame.jar` committed to the repo. The committed artifact can drift from the source.
-- `.gitignore` is a generic Visual Studio / Eclipse template with no Java/Maven entries.
-- Dockerfile uses the committed jar directly rather than building from source.
-- No tests. No CI. No linting. No formatting enforcement.
-
-### UI/UX
-
-- 20×20 grid of plain `JPanel` cells with `Color.white` (snake), `Color.BLUE` (food), `Color.darkGray` (empty). No styling.
-- No menu screen, no game over screen, no score display, no pause, no restart. The README says: "If you lose, just close it and re-open it."
-- Window is 300×300 pixels with no minimum size; cells are tiny.
-- No sound.
-
----
-
-## Decision records
-
-### ADR-1: Platform — stay on Java/Swing with FlatLaf
-
-**Context.** Three realistic options:
-
-| Option | Modern look | Agent buildability / UI tests | Distribution | Maintainability |
-|---|---|---|---|---|
-| Keep Java, modernise Swing (FlatLaf) | Good with FlatLaf | `mvn verify`; Swing UI test with AssertJ-Swing or FEST | Single jar | Good |
-| Rewrite in JavaFX | Very good | Maven; TestFX for UI tests | Requires JavaFX runtime or jlink | Good |
-| Rewrite as web app (JS/Canvas) | Excellent | npm; Playwright; trivial CI | Browser | Depends on framework |
-
-**Decision:** Stay on Java, add FlatLaf for the UI theme.
-
-**Reasoning:**
-- Incremental migration is required (no big-bang rewrites; a playable version must exist at every phase boundary).
-- FlatLaf drops in as a single Maven dependency and immediately gives a modern, flat look without touching any rendering code.
-- JavaFX would require moving all rendering code and the full build setup; risk is higher for no material gain at this scale.
-- A web rewrite is a complete rewrite with zero code reuse; the project is simple enough that the Java version can be made fully polished.
-
-**Consequences.** The `javax.swing.Timer` replaces `Thread.sleep` as the game loop mechanism, eliminating the threading violations. FlatLaf is the single external runtime dependency.
-
-### ADR-2: Game loop — replace `Thread.sleep` with `javax.swing.Timer`
-
-**Context.** `ThreadsController extends Thread` drives the game loop with `Thread.sleep(speed)`. All rendering calls happen on that thread, not the Event Dispatch Thread (EDT), violating Swing's threading model.
-
-**Decision:** Replace the game thread with `javax.swing.Timer` firing on the EDT. Game state updates happen in the timer callback. A single `panel.repaint()` call at the end of each tick triggers rendering.
-
-**Consequences.** Thread-safety issues disappear. The `ThreadsController` class is deleted. Game logic moves to a pure `GameEngine` class with no threading concerns.
-
-### ADR-3: Package structure — `com.snake.*`
-
-**Context.** All classes are in the default package. This is incompatible with proper Java tooling, prevents package-private visibility scoping, and blocks future module support.
-
-**Decision:** Move all classes to `com.snake.*` with sub-packages `core`, `ui`, `input`.
-
-**Consequences.** All import statements must be updated. Maven source layout changes to `src/main/java`. This is a one-PR mechanical rename.
+- No CI — code reviewer has no automated pass/fail signal
+- No visual theme — plain white/blue/gray cells on a bare JFrame
+- No custom rendering — 400 individual JPanels instead of one `paintComponent`
+- No menu screen — game starts immediately with no title, no controls shown
+- No score display — player cannot see their score during play
+- No game-over screen — game hangs; there is no restart
+- No pause — Escape does nothing
+- No high score — session-only, not persisted
+- No tests — game logic cannot be safely changed
+- No speed progression — constant speed regardless of snake length
 
 ---
 
-## Target architecture
+## Decisions
 
-### Module breakdown
+### ADR-1: Platform — Java + Swing + FlatLaf
 
-```
-com.snake
-├── Main                        Entry point: builds window, starts game
-├── core
-│   ├── Direction               Enum: UP, DOWN, LEFT, RIGHT (replaces int codes)
-│   ├── Cell                    Enum: EMPTY, SNAKE_HEAD, SNAKE_BODY, FOOD
-│   ├── Position                Immutable (row, col) value type (replaces Tuple)
-│   ├── GameState               Pure value: grid, snake deque, food pos, score, status
-│   ├── GameEngine              Tick logic: move, collision, eat, grow (no threading)
-│   └── GameStatus              Enum: RUNNING, PAUSED, GAME_OVER
-├── ui
-│   ├── GameWindow              JFrame: owns card layout, switches between panels
-│   ├── MenuPanel               JPanel: title, Play, High Score, Settings
-│   ├── GamePanel               JPanel: renders GameState; owns javax.swing.Timer
-│   ├── PauseOverlay            JPanel: semi-transparent overlay over GamePanel
-│   ├── GameOverPanel           JPanel: score, high score, Play Again, Menu
-│   └── SettingsPanel           JPanel: speed slider, key binding display
-└── input
-    └── InputHandler            KeyAdapter: maps keys to Direction; decoupled from game
-```
+Stay on Java/Swing. Add FlatLaf (Apache 2.0, `com.formdev:flatlaf:3.4`) for theming. One Maven dependency and one `FlatDarkLaf.setup()` call — zero risk, maximum visual lift with no rewrite.
 
-### Data flow
+Alternatives rejected: JavaFX (significant migration for same result at this scale); web rewrite (complete rewrite, no code reuse, violates "always playable" constraint).
 
-```
-KeyEvent → InputHandler → GamePanel (queues next direction)
-                                ↓
-javax.swing.Timer tick → GameEngine.tick(state, direction) → new GameState
-                                ↓
-                         GamePanel.repaint() → renders GameState
-```
+### ADR-2: Rendering — replace JPanel grid with single custom canvas
 
-`GameState` is immutable. `GameEngine.tick()` returns a new `GameState`. No shared mutable fields.
+Replace the 400-cell `JPanel` grid with a single `GamePanel extends JPanel` that overrides `paintComponent(Graphics2D)`. This is the enabling change for all visual improvements: rounded corners, distinct food shape, anti-aliasing, smooth grid lines, distinct snake head. Impossible to achieve with 400 individual `JPanel` cells.
 
-### Folder structure
+Migration path: `GamePanel` reads a shared `int[][]` grid state. `ThreadsController` writes state and calls `SwingUtilities.invokeLater(gamePanel::repaint)`. Minimal structural change — no full GameEngine extraction required.
+
+### ADR-3: Game loop — replace `Thread.sleep` with `javax.swing.Timer`
+
+`ThreadsController extends Thread` + `Thread.sleep` drives the game off-EDT. Replacing with `javax.swing.Timer` fires ticks on the EDT, eliminates threading violations (BUG-2), and makes restart/pause trivial: `timer.stop()` / `timer.start()`.
+
+### ADR-4: Java version — standardise on Java 17
+
+`pom.xml` targets Java 11; `Dockerfile` uses `openjdk:17`. Standardise on Java 17 in `pom.xml` to match Docker. Both are LTS; only two properties in `pom.xml` change.
+
+---
+
+## Target structure
+
+Minimal changes to file layout. No package rename — keeping all classes in the default package to minimise diff size and risk.
 
 ```
 Snake/
-├── pom.xml
+├── pom.xml                       Updated: Java 17, FlatLaf dep, JUnit 5 dep
 ├── src/
-│   ├── main/java/com/snake/   (all production code)
-│   └── test/java/com/snake/   (all tests)
+│   ├── Main.java                 Updated: FlatDarkLaf.setup(), show MenuPanel first
+│   ├── GamePanel.java            NEW: single canvas, paintComponent, owns Timer
+│   ├── MenuPanel.java            NEW: title screen
+│   ├── GameOverPanel.java        NEW: game-over overlay with score and restart
+│   ├── ScoreHud.java             NEW: score and high score bar above the grid
+│   ├── ThreadsController.java    Updated: drive via Timer tick, fix bugs
+│   ├── Window.java               Updated: CardLayout between Menu and Game
+│   ├── KeyboardListener.java     Updated: add WASD, pause key
+│   ├── Direction.java            NEW: enum replacing magic int directions
+│   ├── Tuple.java                Kept: remove unused xf/yf fields
+│   ├── DataOfSquare.java         Deleted: replaced by GamePanel state array
+│   └── SquarePanel.java          Deleted: replaced by GamePanel
 ├── docs/
 │   └── ARCHITECTURE.md
 └── .github/
     └── workflows/
-        ├── ci.yml             (build + test on every PR)
-        └── release.yml        (publish GitHub Release on tag)
+        └── ci.yml                NEW: mvn verify on every PR and push to master
+```
+
+### Data flow (after ARCH-06)
+
+```
+KeyEvent -> KeyboardListener -> stores Direction in volatile field
+                                          |
+javax.swing.Timer tick (EDT) -> ThreadsController.tick(direction)
+                                   /           \
+                           update int[][]    update score
+                           grid state
+                                |
+                      GamePanel.repaint() -> paintComponent draws full board
 ```
 
 ---
 
-## Modernization areas
+## Work items
 
-### 1. Project foundation and build — MUST
+### ARCH-01 — GitHub Actions CI
 
-**Why:** No build tool means no repeatable build, no dependency management, no CI gate.
+**Why:** No PR can be safely merged without an automated build check. The code reviewer has no signal. This is the prerequisite for all other work.
 
-**What:** Maven `pom.xml` (PR#1 done) + GitHub Actions `ci.yml` that runs `mvn verify` on every PR and push to `master`. CI status check must be green before any PR can be merged.
+**What:** Add `.github/workflows/ci.yml` triggering on `pull_request` and `push` to `master`. Sets up Java 17, runs `mvn verify`.
 
-**Scope:** `pom.xml`, `.github/workflows/ci.yml`. No source code changes.
+**In scope:** The YAML file only. No source changes.
 
-**Note:** PR#1 adds Maven. The CI workflow is the immediate follow-on and is the most important single item in the roadmap.
+**Out of scope:** Coverage gate, test runs (no tests yet).
 
-### 2. Remove committed binary and fix Docker — MUST
+**Done when:**
+1. `.github/workflows/ci.yml` exists on master.
+2. A PR with a compile error fails the CI check.
+3. Current code (compile-only) shows a green check.
+4. Branch protection requires green status before merge.
 
-**Why:** `SnakeGame.jar` committed to the repo can silently diverge from source. The Docker setup is broken (wrong jar filename, copies prebuilt artifact instead of building).
-
-**What:** Remove `SnakeGame.jar` from git tracking. Update `Dockerfile` to run `mvn package` and copy from `target/`. Fix the filename typo in `docker-compose.yml`.
-
-**Scope:** `.gitignore`, `Dockerfile`, `docker-compose.yml`. No source changes.
-
-### 3. Architecture refactor — MUST
-
-**Why:** Game logic, threading, and rendering are fused into `ThreadsController`. There is no testable unit and no seam to add features safely.
-
-**What:** Introduce `GameState`, `GameEngine`, `Direction`, `Cell`, `Position` in `com.snake.core`. Delete `ThreadsController`. Replace `DataOfSquare`/`SquarePanel`/`Tuple` with the new types. Move to `com.snake.*` package structure.
-
-**Scope:** All source files. This is the largest change; it is phased across multiple PRs (see Roadmap).
-
-**Out of scope:** No new gameplay features during this refactor.
-
-### 4. Bug fixes — MUST
-
-**Why:** `stopTheGame()` makes the game unplayable after one collision. The food-spawn hardcoding is a latent defect.
-
-**What:**
-- Replace `stopTheGame()`'s infinite loop with a state transition to `GameStatus.GAME_OVER` and display the game over screen.
-- Replace hardcoded `19` in food spawn with `GameState.GRID_SIZE - 1`.
-- Move all `repaint()` calls to the EDT via `SwingUtilities.invokeLater` until the Timer refactor lands.
-
-**Scope:** `ThreadsController`, later `GameEngine`.
-
-### 5. Game loop and rendering — MUST
-
-**Why:** `Thread.sleep` in the game thread is a Swing threading violation. Rendering is row-by-row cell updates rather than a single clean paint.
-
-**What:** Replace `ThreadsController extends Thread` with `javax.swing.Timer` in `GamePanel`. One `repaint()` per tick. `GamePanel.paintComponent()` iterates `GameState.grid` and draws the full board in one pass.
-
-**Scope:** New `GamePanel`, deleted `ThreadsController`, deleted `DataOfSquare`/`SquarePanel`.
-
-### 6. Testing and CI — MUST
-
-**Why:** Zero tests means every refactor is blind. The Code Reviewer needs an automated signal.
-
-**What:** Add JUnit 5 + AssertJ to `pom.xml`. Write unit tests for `GameEngine`: movement in all four directions, wall wrapping, self-collision, food consumption, score increment, grow logic. Minimum 80% line coverage on `com.snake.core` enforced by JaCoCo in CI.
-
-**Scope:** `src/test/java/com/snake/core/`. No UI tests in this phase.
-
-### 7. UI/UX and visual design — MUST
-
-**Why:** The current UI is four colors on a blank JFrame. There is no menu, no score, no restart, no pause — it is not a game someone would choose to play.
-
-**What:** See UI/UX direction section. FlatLaf theme, menu screen, game over screen, pause overlay, score HUD. All screens keyboard-navigable.
-
-**Scope:** `com.snake.ui.*`. Game logic unchanged.
-
-### 8. Gameplay features — SHOULD
-
-**Why:** The game is functional but has no progression or quality-of-life features.
-
-**What:**
-- Speed increase as the snake grows (every 5 segments, decrease timer interval by 5ms, floor at 100ms).
-- Persistent high score stored in `~/.snake/highscore.properties`.
-- Pause toggle (Escape key).
-- Current score displayed during gameplay.
-
-**Scope:** `GameEngine`, `GamePanel` HUD, `SettingsPanel`.
-
-### 9. Controls and accessibility — SHOULD
-
-**Why:** Arrow-key-only controls exclude WASD users. No accessibility considerations exist.
-
-**What:**
-- WASD support alongside arrow keys.
-- All interactive UI elements (buttons, settings) must be keyboard-navigable (Tab + Enter).
-- Minimum 14pt font for all text.
-- Food cell rendered with a distinct shape (circle vs the square snake body) so color is not the only differentiator.
-
-**Scope:** `InputHandler`, `GamePanel`, all UI panels.
-
-### 10. Audio — COULD
-
-**Why:** Sound effects add polish but are not essential for the game to feel modern.
-
-**What:** Short sound effects for food eaten and game over via `javax.sound.sampled`. Mute toggle in settings. Bundled as resources in the jar.
-
-**Scope:** New `com.snake.audio.AudioManager`. Bundled `.wav` files in `src/main/resources/`.
-
-**Drop if:** Sound effects are hard to source with an appropriate license. Silence is better than low-quality audio.
-
-### 11. Release and docs — SHOULD
-
-**Why:** Currently, distribution requires cloning the repo and running the jar manually. There is no version.
-
-**What:** GitHub Actions `release.yml` triggered on version tags; produces a GitHub Release with the runnable `SnakeGame.jar` attached. Update README to reflect the Maven build and new screenshot.
-
-**Scope:** `.github/workflows/release.yml`, `README.md`.
+**Depends on:** none (Maven already merged).
 
 ---
 
-## Roadmap
+### ARCH-02 — FlatLaf theme + window sizing
 
-Each phase ends with a buildable, playable game. Each PR within a phase is independently reviewable.
+**Why:** The game runs in a bare 300×300 JFrame with no styling. FlatLaf turns it into a modern dark application with one Maven dependency and one method call.
 
-### Phase 1 — Foundation (prerequisite: PR#1 merged)
+**What:**
+- Add FlatLaf to `pom.xml` (`com.formdev:flatlaf:3.4`). Update Java to 17.
+- Call `FlatDarkLaf.setup()` in `Main.main()` before anything else.
+- Set window minimum size 440×500, center on screen at startup, title "Snake".
 
-**Goal:** Every subsequent PR has an automated build and test gate.
+**In scope:** `pom.xml`, `Main.java`. No game logic changes.
 
-| PR | Change |
-|---|---|
-| CI workflow | Add `.github/workflows/ci.yml`; runs `mvn verify` on PR and push to master |
-| Remove committed jar | Remove `SnakeGame.jar` from git; add Maven and `target/` to `.gitignore` |
-| Fix Docker | Build from source in `Dockerfile`; fix jar name typo in `docker-compose.yml` |
+**Done when:**
+1. `mvn verify` exits 0.
+2. Window opens with modern dark FlatLaf frame, title "Snake", centered, minimum 440×500.
 
-**Gate:** `mvn verify` passes in CI. Game still launches via `java -jar target/SnakeGame.jar`.
-
-### Phase 2 — Critical bug fixes
-
-**Goal:** Game over no longer freezes the process.
-
-| PR | Change |
-|---|---|
-| Direction enum | Add `Direction` enum; replace int constants in `ThreadsController` and `KeyboardListener` |
-| Fix stopTheGame | Replace infinite loop with a flag; show "GAME OVER — close to restart" text on the frame title as a stub |
-| Fix food spawn | Replace hardcoded `19` with `Window.width - 1` / `Window.height - 1` |
-| EDT fix | Wrap `lightMeUp` calls in `SwingUtilities.invokeLater` |
-
-**Gate:** Game over is recoverable (close and reopen without task-manager). No compiler warnings.
-
-### Phase 3 — Architecture refactor
-
-**Goal:** Game logic is testable; all classes in `com.snake.*`.
-
-| PR | Change |
-|---|---|
-| `Position` + `Cell` + `Direction` | Immutable value types in `com.snake.core` |
-| `GameState` | Pure state record; no Swing dependencies |
-| `GameEngine` | Tick logic extracted from `ThreadsController`; `GameEngine.tick()` returns new `GameState` |
-| Package rename | Move all classes to `com.snake.*`; update `pom.xml` source layout to `src/main/java` |
-| Delete legacy classes | Remove `ThreadsController`, `DataOfSquare`, `SquarePanel`, `Tuple`, `KeyboardListener` |
-| `GamePanel` with Timer | New `GamePanel` owns `javax.swing.Timer`; renders from `GameState` |
-
-**Gate:** `mvn verify` passes. Game plays identically to before. No Swing threading violations.
-
-### Phase 4 — Testing
-
-**Goal:** Core logic has automated test coverage enforced by CI.
-
-| PR | Change |
-|---|---|
-| Test framework | Add JUnit 5 + AssertJ + JaCoCo to `pom.xml` |
-| `GameEngineTest` | Movement, wall wrap, self-collision, food eaten, score, grow logic |
-| CI coverage gate | JaCoCo minimum 80% line coverage on `com.snake.core` fails the build if missed |
-
-**Gate:** `mvn verify` runs tests; coverage gate enforced. No regressions.
-
-### Phase 5 — UI/UX
-
-**Goal:** The game feels modern and complete.
-
-| PR | Change |
-|---|---|
-| FlatLaf theme | Add FlatLaf dependency; apply `FlatDarkLaf.setup()` in `Main` |
-| `MenuPanel` | Title, Play button, high score display |
-| `GameWindow` card layout | `CardLayout` switching between Menu, Game, GameOver, Settings |
-| Game panel redesign | Dark background, grid lines, styled snake and food cells |
-| `GameOverPanel` | Score, high score, Play Again button, Menu button |
-| Pause overlay | Escape toggles pause; semi-transparent overlay |
-| Score HUD | Current score and high score shown during play |
-| `SettingsPanel` | Speed slider |
-
-**Gate:** All screens reachable by keyboard. WCAG AA color contrast on text. Minimum 14pt fonts.
-
-### Phase 6 — Gameplay and accessibility
-
-**Goal:** Controls and progression complete the player experience.
-
-| PR | Change |
-|---|---|
-| WASD controls | Add W/A/S/D to `InputHandler` |
-| Speed progression | Timer interval decreases every 5 segments (floor 100ms) |
-| High score persistence | `~/.snake/highscore.properties` read on start, written on game over |
-| Food shape | Draw food as a filled circle; snake body as rounded rect |
-| Accessibility | Tab order on all panels; food shape cue for color blindness |
-
-**Gate:** Playable with WASD. High score survives restart.
-
-### Phase 7 — Audio and release (optional)
-
-| PR | Change |
-|---|---|
-| Audio manager | `javax.sound.sampled` for eat/game-over sounds; mute toggle |
-| Release workflow | GitHub Actions on tag push; attaches `SnakeGame.jar` to a GitHub Release |
-| README update | New screenshot, Maven build instructions, gameplay controls |
+**Depends on:** ARCH-01.
 
 ---
 
-## Quality gates and conventions
+### ARCH-03 — Custom game panel rendering
 
-### Every PR must pass
+**Why:** 400 individual `JPanel` cells cannot support rounded corners, distinct shapes, or anti-aliasing. A single `GamePanel` with `paintComponent(Graphics2D)` enables all visual improvements.
 
-1. `mvn verify` exits 0 (compile + tests + JaCoCo coverage gate).
-2. Zero compiler warnings (`-Xlint:all` in `pom.xml` from Phase 3 onward).
-3. Checkstyle passes with Google Java Style configuration.
-4. No Swing calls outside the EDT (enforced by inspection; flagged in code review).
-5. The game launches (`java -jar target/SnakeGame.jar`) without error output on stdout/stderr.
+**What:**
+- Add `GamePanel extends JPanel` with `int[][] grid` (0=empty, 1=body, 2=head, 3=food).
+- `paintComponent(Graphics2D g2)`:
+  - Enable anti-aliasing.
+  - Fill background `#0F0F23`.
+  - Draw grid lines `#1A1A3A` (1px).
+  - Snake body cells: rounded rect (4px inset, 8px corner radius), fill `#00C9A7`.
+  - Snake head cell: same shape, fill `#00FF87`, 1px border `#80FFB8`.
+  - Food cell: filled oval (4px inset), fill `#FF6B6B`.
+- `ThreadsController` writes to `GamePanel.grid[][]`; calls `SwingUtilities.invokeLater(gamePanel::repaint)`.
+- Remove `DataOfSquare.java` and `SquarePanel.java`.
+- `Window` adds `GamePanel` in place of the old `GridLayout`.
 
-### Test coverage requirement
+**Done when:**
+1. `mvn verify` exits 0.
+2. Dark background, grid lines, rounded snake body, bright distinct head, circular food.
+3. No `DataOfSquare` or `SquarePanel` references remain.
+4. `repaint()` only called from the EDT.
 
-- Minimum **80% line coverage** on `com.snake.core` measured by JaCoCo.
-- `com.snake.ui` and `com.snake.input` are excluded from the coverage gate (UI tests are deferred).
-
-### Coding conventions
-
-- Java 11, Google Java Style (2-space indent, 100-char line limit).
-- `final` on all fields that are not reassigned.
-- No public mutable static fields.
-- Enums for all fixed sets of values (direction codes, cell types, game status).
-- No raw `Thread`; use `javax.swing.Timer` for timed UI work.
-- One top-level class per file; package-private visibility by default.
-
-### Branch and commit conventions
-
-- Branch names: `feat/<short-description>`, `fix/<short-description>`, `docs/<short-description>`.
-- Commit subject: imperative, ≤72 chars (e.g. `fix: replace stopTheGame infinite loop with GAME_OVER state`).
-- One logical change per PR. No "misc cleanup" PRs.
-- PRs target `master`. Squash merge.
+**Depends on:** ARCH-01, ARCH-02.
 
 ---
 
-## UI/UX direction
+### ARCH-04 — Score HUD
+
+**Why:** There is no score display at all.
+
+**What:**
+- Track `int score` in `ThreadsController`; increment by 10 per food eaten.
+- Add `ScoreHud extends JPanel` (height 40px, background `#0A0A1A`):
+  - Left: "SCORE  0042" in monospace 16pt bold, `#E0E0E0`.
+  - Right: "BEST  0099" in same style.
+- `Window` uses `BorderLayout`: `ScoreHud` at `NORTH`, `GamePanel` at `CENTER`.
+- High score is session-only here (persistence in ARCH-11).
+
+**Done when:**
+1. Score visible during play; increments by 10 per food.
+2. Session high score tracked and displayed.
+3. Monospace font renders on dark `#0A0A1A` bar.
+
+**Depends on:** ARCH-03.
+
+---
+
+### ARCH-05 — Menu screen
+
+**Why:** Game starts immediately with no title, instructions, or context.
+
+**What:**
+- Add `MenuPanel extends JPanel` (background `#0F0F23`):
+  - Centred title "SNAKE" in 64pt bold, `#4ECCA3`.
+  - Subtitle "Use arrow keys or WASD" in 14pt `#8888AA`.
+  - "PLAY" button: 180×50px, background `#4ECCA3`, text `#0F0F23`, 8px radius.
+  - "BEST: 0" in 16pt `#8888AA`.
+- `Window` uses `CardLayout`: cards `"menu"` and `"game"`.
+- PLAY button (or Space/Enter) transitions to game card and starts `ThreadsController`.
+
+**Done when:**
+1. Game opens on menu screen.
+2. Title, subtitle, Play button render correctly.
+3. Play button (and Space/Enter) starts the game.
+4. All interactive elements reachable by keyboard.
+
+**Depends on:** ARCH-03.
+
+---
+
+### ARCH-06 — Fix game loop: replace Thread.sleep with javax.swing.Timer
+
+**Why:** `Thread.sleep` off-EDT causes rendering glitches (BUG-2). `stopTheGame()` loops forever on collision (BUG-1). This fix enables clean pause and restart.
+
+**What:**
+- Remove `ThreadsController extends Thread`. Make it a plain class with a `tick()` method.
+- `GamePanel` owns a `javax.swing.Timer(speed, e -> controller.tick())`.
+- On collision: set `gameOver = true`, call `timer.stop()` — no infinite loop.
+- Fix BUG-3: replace `Math.random()*19` with `Math.random()*Window.width`.
+- All state updates inside `tick()` (EDT) — `repaint()` at end of tick.
+
+**Done when:**
+1. Game plays identically — movement, food, growth, collision all work.
+2. On collision, game stops cleanly with no infinite loop.
+3. No `Thread.sleep` in production code.
+4. `mvn verify` exits 0.
+
+**Depends on:** ARCH-03.
+
+---
+
+### ARCH-07 — Game-over screen with restart
+
+**Why:** On collision the game currently hangs. There is no restart. This is the most critical UX bug.
+
+**What:**
+- Add `GameOverPanel extends JPanel` overlay (`rgba(15,15,35,0.85)` background):
+  - "GAME OVER" in 48pt bold, `#FF6B6B`.
+  - "SCORE  0042" in 22pt `#E0E0E0`.
+  - "BEST   0099" in 22pt `#4ECCA3` (shows "NEW BEST!" if record broken).
+  - "PLAY AGAIN" and "MENU" buttons.
+- "PLAY AGAIN" resets `ThreadsController` state and restarts timer.
+- "MENU" returns to menu card.
+- `R` key = PLAY AGAIN; `M` / `Escape` = MENU.
+
+**Done when:**
+1. Overlay appears on collision over frozen grid.
+2. Score and session best displayed correctly.
+3. PLAY AGAIN resets and restarts from initial state.
+4. MENU returns to menu screen.
+5. R and M keyboard shortcuts work.
+6. No process kill required to play again.
+
+**Depends on:** ARCH-05, ARCH-06.
+
+---
+
+### ARCH-08 — Pause screen
+
+**Why:** No way to pause. Standard game feature.
+
+**What:**
+- `Escape` toggles pause: `timer.stop()` / `timer.start()`.
+- Pause overlay on `GamePanel`:
+  - "PAUSED" in 48pt bold, `#E0E0E0`.
+  - "Press ESC to resume" in 14pt `#8888AA`.
+- Input during pause ignored except `Escape` (resume) and `M` (menu).
+
+**Done when:**
+1. `Escape` during play shows overlay and freezes snake.
+2. `Escape` again resumes exactly.
+3. Arrow keys / WASD ignored while paused.
+4. `M` during pause returns to menu.
+
+**Depends on:** ARCH-06, ARCH-07.
+
+---
+
+### ARCH-09 — Direction enum + WASD controls
+
+**Why:** Direction is `static int` with magic values 0–4 scattered across two classes. WASD is a standard control scheme.
+
+**What:**
+- Add `enum Direction { UP, DOWN, LEFT, RIGHT }`.
+- Replace `static int directionSnake` with `volatile Direction direction` in `ThreadsController`.
+- Update `moveInterne` switch to use enum.
+- `KeyboardListener` maps both arrow keys and WASD to `Direction`.
+
+**Done when:**
+1. Game playable with WASD and arrow keys.
+2. No integer direction constants remain in production code.
+3. `mvn verify` exits 0.
+
+**Depends on:** ARCH-06.
+
+---
+
+### ARCH-10 — JUnit 5 unit tests for game logic
+
+**Why:** Zero tests means every change is blind. CI currently enforces compile-only.
+
+**What:**
+- Add JUnit 5 (`junit-jupiter:5.10.2`) and AssertJ (`assertj-core:3.25.3`) to `pom.xml` (test scope).
+- Add `maven-surefire-plugin:3.2.5`.
+- Write `ThreadsControllerTest.java` covering:
+  - Movement in all four directions.
+  - Wall wrapping (right from col 19 wraps to col 0, etc.).
+  - Self-collision detection.
+  - Food consumed: size increments, score increments by 10.
+  - Food not spawning on an occupied cell.
+
+**Done when:**
+1. `mvn test` exits 0 with all tests passing.
+2. At least 8 passing tests covering the listed scenarios.
+3. CI runs tests on every PR.
+
+**Depends on:** ARCH-09.
+
+---
+
+### ARCH-11 — Speed progression + persistent high score
+
+**Why:** Constant speed has no difficulty curve. Score not persisting across sessions is discouraging.
+
+**What:**
+- Speed: decrease timer interval by 3ms per food eaten; floor at 80ms. Initial: 200ms.
+- Persist high score to `~/.snake/highscore`. Read on start, write on game over if new best. Silent on IO error.
+- Show "NEW BEST!" in game-over overlay when record broken.
+
+**Done when:**
+1. Speed visibly increases as snake grows.
+2. High score survives process restart.
+3. "NEW BEST!" shown in overlay on new record.
+4. IO error on write silently swallowed.
+
+**Depends on:** ARCH-07, ARCH-10.
+
+---
+
+### ARCH-12 — Updated README
+
+**Why:** README still says "just download SnakeGame.jar" and "close and re-open to restart" — both wrong after this work.
+
+**What:**
+- Replace build instructions with `mvn package` + `java -jar target/SnakeGame.jar`.
+- Document controls: arrows + WASD, Escape = pause, R = restart, M = menu.
+- Add screenshot from the completed game-over screen.
+- Update Docker section to reflect build-from-source.
+
+**Done when:**
+1. README accurately describes Maven build flow.
+2. All controls documented.
+3. At least one screenshot of the modernized game included.
+
+**Depends on:** ARCH-07.
+
+---
+
+## Quality gates — every PR must pass
+
+| Check | Enforcement |
+|---|---|
+| `mvn verify` exits 0 | GitHub Actions CI (ARCH-01) |
+| Zero new compiler warnings | Code reviewer |
+| `repaint()` only called from EDT | Code reviewer |
+| Game launches: `java -jar target/SnakeGame.jar` | Stated in every PR's "Done when" |
+| ARCH-10+: all tests pass | `mvn test` in CI |
+
+**Branch naming:** `feat/<desc>`, `fix/<desc>`, `docs/<desc>`
+**Commit style:** imperative subject ≤72 chars — e.g. `fix: replace stopTheGame loop with timer.stop()`
+**Merge:** squash merge to `master`
+
+---
+
+## UI/UX specification
 
 ### Color palette
 
-#### Dark theme (default)
-
-| Element | Color | Hex |
+| Role | Hex | Usage |
 |---|---|---|
-| Background | Deep navy | `#0F0F23` |
-| Grid lines | Subtle dark | `#1A1A3A` |
-| Snake head | Bright mint | `#00FF87` |
-| Snake body | Teal | `#00C9A7` |
-| Food | Coral | `#FF6B6B` |
-| Text primary | Light gray | `#E0E0E0` |
-| Text secondary | Muted | `#8888AA` |
-| Button background | Dark card | `#1E1E3A` |
-| Button hover | Slightly lighter | `#2A2A50` |
-| Accent | Mint | `#4ECCA3` |
-
-#### Light theme (toggled in Settings)
-
-| Element | Color | Hex |
-|---|---|---|
-| Background | Off-white | `#F5F5F5` |
-| Grid lines | Light gray | `#E0E0E0` |
-| Snake head | Forest green | `#2D6A4F` |
-| Snake body | Medium green | `#40916C` |
-| Food | Red | `#D62828` |
-| Text primary | Near black | `#1A1A1A` |
-| Button background | White | `#FFFFFF` |
+| Background | `#0F0F23` | Window, all panels |
+| Grid line | `#1A1A3A` | 1px lines between cells |
+| HUD bar | `#0A0A1A` | Score bar background |
+| Snake head | `#00FF87` | Head cell fill |
+| Snake body | `#00C9A7` | Body cells fill |
+| Food | `#FF6B6B` | Food circle fill |
+| Head border | `#80FFB8` | 1px outline on head cell |
+| Text primary | `#E0E0E0` | Labels, scores |
+| Text secondary | `#8888AA` | Subtitles, hints |
+| Accent | `#4ECCA3` | Buttons, best score, "NEW BEST!" |
+| Overlay | `rgba(15,15,35,0.85)` | Game-over and pause overlays |
 
 ### Typography
 
-- **FlatLaf system font** (Inter on Windows, SF Pro on Mac, Noto Sans on Linux).
-- Game title (menu): 48pt bold.
-- Score label: 18pt bold, monospace (score digits don't shift layout as they grow).
-- Button label: 16pt medium.
-- Body / instructions: 14pt regular. Never smaller than 14pt.
+- All text: `Monospaced` system font (guaranteed available, no bundling needed).
+- Menu title "SNAKE": 64pt bold, `#4ECCA3`.
+- "GAME OVER" / "PAUSED": 48pt bold.
+- Score in HUD: 16pt bold.
+- Score on game-over panel: 22pt bold.
+- Buttons: 16pt medium.
+- Minimum anywhere: **14pt**.
 
-### Screens
+### Cell rendering (ARCH-03 detail)
 
-**Menu**
-- Centered vertically and horizontally.
-- Title "SNAKE" at top in accent color.
-- High score below title in secondary text color.
-- Single "PLAY" button (primary action, large, accent background).
-- "SETTINGS" text button below.
+Enable anti-aliasing: `g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)`
 
-**Game**
-- Full window is the game grid.
-- Score HUD in top bar: "SCORE 000" left, "BEST 000" right.
-- Grid lines drawn but subtle (low-contrast, 1px).
-- Snake head: slightly larger / brighter than body segments.
-- Food: circle (not square) to distinguish it from the grid by shape alone.
-- Pause hint: small "ESC to pause" text at the bottom, fades after 3 seconds.
+- **Empty cell:** fill background color, draw grid lines only.
+- **Snake body:** `g2.fillRoundRect(x+2, y+2, cellW-4, cellH-4, 8, 8)` in `#00C9A7`.
+- **Snake head:** same shape in `#00FF87` + `g2.drawRoundRect(x+2, y+2, cellW-4, cellH-4, 8, 8)` border in `#80FFB8`.
+- **Food:** `g2.fillOval(x+4, y+4, cellW-8, cellH-8)` in `#FF6B6B`.
 
-**Pause overlay**
-- Semi-transparent dark overlay (60% opacity) over the frozen game.
-- "PAUSED" in large text, centered.
-- "RESUME" and "QUIT TO MENU" buttons below.
+### Screen layouts
 
-**Game over**
-- Slide-in panel over the game (not a new screen; keeps the final board visible beneath).
-- "GAME OVER" in large coral text.
-- "SCORE: 42" and "BEST: 99" below.
-- "PLAY AGAIN" (primary) and "MENU" (secondary) buttons.
+**Menu:**
+```
+┌──────────────────────────┐
+│                          │
+│         SNAKE            │  64pt bold, #4ECCA3
+│  Use arrows or WASD      │  14pt, #8888AA
+│                          │
+│       [ PLAY ]           │  180×50, bg #4ECCA3, text #0F0F23, r=8px
+│                          │
+│      BEST: 0             │  16pt, #8888AA
+│                          │
+└──────────────────────────┘
+```
 
-**Settings**
-- Speed: slider from "Slow" to "Fast" (maps to timer interval 250ms → 100ms).
-- Theme toggle: Dark / Light.
-- "BACK" button returns to menu.
+**Game (playing):**
+```
+┌──────────────────────────┐
+│ SCORE  0042   BEST  0099 │  40px HUD, #0A0A1A
+├──────────────────────────┤
+│  dark grid #0F0F23       │
+│  · · ●●●▶ · · ○ · · ·   │  snake: rounded rects; food: circle
+│  · · · · · · · · · · ·  │
+│              ESC pause   │  hint fades after 5 seconds
+└──────────────────────────┘
+```
 
-### Animation principles
+**Pause overlay:**
+```
+overlay (85% opacity) over frozen game
+         PAUSED            48pt bold, #E0E0E0
+   Press ESC to resume     14pt, #8888AA
+         [ MENU ]          button
+```
 
-- Game ticks are discrete (grid-based movement only; no sub-pixel interpolation in scope).
-- Game over panel slides in from bottom over 200ms (ease-out).
-- Button hover: background lightens over 100ms.
-- No animations that can interfere with game input timing.
+**Game over overlay:**
+```
+overlay (85% opacity) over frozen game
+       GAME OVER           48pt bold, #FF6B6B
+      SCORE  0042          22pt, #E0E0E0
+      BEST   0099          22pt, #4ECCA3  (or "NEW BEST!" if record)
+  [ PLAY AGAIN ]  [ MENU ] buttons
+   R to restart  M or ESC  14pt hint
+```
 
-### Accessibility requirements
+### Accessibility
 
-- All buttons reachable by Tab key; activated by Enter/Space.
-- Focus indicator: 2px accent-color outline on focused element.
-- Food cell: circle shape (not just color difference from snake body).
-- Minimum contrast ratio 4.5:1 for all text (WCAG AA).
-- Window resizable; minimum size 420×480. Grid scales proportionally.
+- All buttons focusable by Tab; activated by Enter/Space.
+- Focus indicator: 2px `#4ECCA3` outline on focused button.
+- Food is a different **shape** (circle) from snake cells (rounded rect) — not color alone.
+- Minimum contrast 4.5:1 for all text (WCAG AA).
+- Window resizable; minimum 440×500; grid scales proportionally.
 
 ---
 
-## Risks and assumptions
+## Assumptions
 
-| # | Risk / Assumption | Mitigation |
-|---|---|---|
-| 1 | **Assumed:** FlatLaf license (Apache 2.0) is compatible with distribution. | Verify before adding the dependency. |
-| 2 | **Assumed:** Java 11 is the target runtime. The Dockerfile uses openjdk:17. | Pin to Java 17 in `pom.xml` to match Docker; or explicitly standardise on 11. Needs a human decision. |
-| 3 | **Risk:** The x/y coordinate conventions in `ThreadsController` are internally inconsistent (row vs column confusion). A mechanical rename could introduce subtle movement bugs. | Cover all movement directions with unit tests in Phase 4 before any coordinate cleanup. Test output against known game states. |
-| 4 | **Assumed:** Single-player only. The commented-out second-snake code in `Window.java` is dropped. | Confirmed by project goal ("polished single-player beats a long feature list"). |
-| 5 | **Risk:** High score stored in `~/.snake/highscore.properties` may not be writable in sandboxed or read-only environments (CI, Docker). | Silently skip persist on write failure; high score degrades gracefully to session-only. |
-| 6 | **Assumed:** No sound assets are available under a free license yet. | Audio (Phase 7) is COULD priority and can be dropped without affecting any other phase. |
-| 7 | **Risk:** Moving from default package to `com.snake.*` touches every file in one PR. | Do the rename in a single mechanical PR with no logic changes so diff review is straightforward. CI catches any missed references. |
+| # | Assumption |
+|---|---|
+| 1 | FlatLaf 3.4 (Apache 2.0) license is acceptable. |
+| 2 | Java 17 is the target runtime — ARCH-02 updates `pom.xml` to match the Dockerfile. |
+| 3 | `Monospaced` system font used everywhere — no font bundling needed, no license concern. |
+| 4 | Sound effects are out of scope. Silence is preferable to low-quality audio. |
+| 5 | High score file write failures are silently ignored — no user notification. |
+| 6 | BUG-4 (food x/y axis swap at `ThreadsController.java:62`) works by coincidence on the 20×20 symmetric grid. It is left in place until ARCH-10 tests prove it is safe to fix. |
+| 7 | The commented-out second-snake code in `Window.java` is dropped without replacement. |
