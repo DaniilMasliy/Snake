@@ -7,7 +7,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
     environment:
       - DISPLAY=host.docker.internal:0
-    command: ["java", "-jar", "/app/Snakegame.jar"]
+    command: ["java", "-jar", "/app/SnakeGame.jar"]
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Allows container to reach the host machine
     tty: true  # Keep the terminal open
