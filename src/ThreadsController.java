@@ -1,4 +1,5 @@
 import java.util.ArrayList;
+import javax.swing.JFrame;
 
 
 //Controls all the game logic .. most important class in this project.
@@ -11,9 +12,12 @@ public class ThreadsController extends Thread {
 
 	 ArrayList<Tuple> positions = new ArrayList<Tuple>();
 	 Tuple foodPosition;
-	 
-	 //Constructor of ControlleurThread 
-	 ThreadsController(Tuple positionDepart){
+	 private volatile boolean running = true;
+	 private final JFrame frame;
+
+	 //Constructor of ControlleurThread
+	 ThreadsController(Tuple positionDepart, JFrame frame){
+		 this.frame = frame;
 		//Get all the threads
 		Squares=Window.Grid;
 		
@@ -31,7 +35,7 @@ public class ThreadsController extends Thread {
 	 
 	 //Important part :
 	 public void run() {
-		 while(true){
+		 while(running){
 			 moveInterne(directionSnake);
 			 checkCollision();
 			 moveExterne();
@@ -72,9 +76,8 @@ public class ThreadsController extends Thread {
 	 //Stops The Game
 	 private void stopTheGame(){
 		 System.out.println("COLISION! \n");
-		 while(true){
-			 pauser();
-		 }
+		 running = false;
+		 frame.setTitle("GAME OVER — close to restart");
 	 }
 	 
 	 //Put food in a position and displays it
