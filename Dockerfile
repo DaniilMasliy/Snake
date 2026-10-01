@@ -1,6 +1,14 @@
-FROM openjdk:17-jdk-slim
+FROM maven:3.9-eclipse-temurin-11 AS build
 
-# Install required libraries for GUI, including libfreetype6 for font rendering
+WORKDIR /app
+
+COPY pom.xml .
+COPY src ./src
+
+RUN mvn package -DskipTests
+
+FROM eclipse-temurin:11-jre-jammy
+
 RUN apt-get update && \
     apt-get install -y \
     libxext6 \
@@ -12,6 +20,6 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY SnakeGame.jar /app/SnakeGame.jar
+COPY --from=build /app/target/SnakeGame.jar /app/SnakeGame.jar
 
 ENTRYPOINT ["java", "-jar", "/app/SnakeGame.jar"]
