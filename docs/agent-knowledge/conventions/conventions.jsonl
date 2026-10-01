@@ -1,0 +1,1 @@
+{"v":1,"id":"cfd999f4cb18","kind":"convention","text":"Maven build command for this project: `mvn package` → produces target/SnakeGame.jar with Main as entry point","originAgent":"snake-architect","teamId":"snake","createdAt":"2026-10-01T12:34:37Z","correlationId":"$5Le1jrGlozrOfs8VUblcJNeyVFjc_nuqvDbz5P7UmiQ","convergence":["snake-architect"],"status":"active"}
